@@ -1,4 +1,12 @@
-from azure.storage.blobservice import BlobService
+try:
+    # New module location sometime after Azure SDK v1.0.
+    #
+    # See
+    # https://github.com/Azure/azure-sdk-for-python/blob/master/ChangeLog.txt
+    from azure.storage.blob import BlobService
+except ImportError:
+    from azure.storage import BlobService
+
 from wal_e import log_help
 
 logger = log_help.WalELogger(__name__)
@@ -25,6 +33,7 @@ class CallingInfo(object):
         """
         return BlobService(account_name=creds.account_name,
                            account_key=creds.account_key,
+                           sas_token=creds.access_token,
                            protocol='https')
 
 

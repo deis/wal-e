@@ -1,10 +1,10 @@
-import boto
 import json
 import os
+
+import boto3
+import botocore
 import pytest
 
-from boto import sts
-from boto.s3.connection import Location
 from wal_e.blobstore import s3
 from wal_e.blobstore.s3 import calling_format
 
@@ -25,6 +25,19 @@ def no_real_s3_credentials():
     return False
 
 
+def bucket_exists(conn, bucket_name):
+    exists = True
+    try:
+        conn.meta.client.head_bucket(Bucket=bucket_name)
+    except botocore.exceptions.ClientError as e:
+        # If a client error is thrown, then check that it was a 404 error.
+        # If it was a 404 error, then the bucket does not exist.
+        error_code = int(e.response['Error']['Code'])
+        if error_code == 404:
+            exists = False
+    return exists
+
+
 def prepare_s3_default_test_bucket():
     # Check credentials are present: this procedure should not be
     # called otherwise.
@@ -34,28 +47,21 @@ def prepare_s3_default_test_bucket():
     bucket_name = 'waletdefwuy' + os.getenv('AWS_ACCESS_KEY_ID').lower()
 
     creds = s3.Credentials(os.getenv('AWS_ACCESS_KEY_ID'),
-                           os.getenv('AWS_SECRET_ACCESS_KEY'),
-                           os.getenv('AWS_SECURITY_TOKEN'))
+                           os.getenv('AWS_SECRET_ACCESS_KEY'))
 
-    cinfo = calling_format.from_store_name(bucket_name)
+    cinfo = calling_format.CallingInfo()
     conn = cinfo.connect(creds)
 
     def _clean():
-        bucket = conn.get_bucket(bucket_name)
-        bucket.delete_keys(key.name for key in bucket.list())
+        bucket = conn.Bucket(bucket_name)
+        for key in bucket.objects.all():
+            key.delete()
 
-    try:
-        conn.create_bucket(bucket_name, location=Location.USWest)
-    except boto.exception.S3CreateError, e:
-        if e.status == 409:
-            # Conflict: bucket already present.  Re-use it, but
-            # clean it out first.
-            _clean()
-        else:
-            raise
-    else:
-        # Success
-        _clean()
+    if not bucket_exists(conn, bucket_name):
+        conn.create_bucket(Bucket=bucket_name)
+
+    # Make sure the bucket is squeaky clean!
+    _clean()
 
     return bucket_name
 
@@ -64,10 +70,6 @@ def prepare_s3_default_test_bucket():
 def default_test_bucket():
     if not no_real_s3_credentials():
         return prepare_s3_default_test_bucket()
-
-
-def boto_supports_certs():
-    return tuple(int(x) for x in boto.__version__.split('.')) >= (2, 6, 0)
 
 
 def make_policy(bucket_name, prefix, allow_get_location=False):
@@ -103,88 +105,51 @@ def make_policy(bucket_name, prefix, allow_get_location=False):
     return json.dumps(structure, indent=2)
 
 
-@pytest.fixture
-def sts_conn():
-    aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
-    aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
-    return sts.connect_to_region(
-        'us-east-1',
-        aws_access_key_id=aws_access_key_id,
-        aws_secret_access_key=aws_secret_access_key)
-
-
 def _delete_keys(bucket, keys):
-    for name in keys:
-        while True:
-            try:
-                k = boto.s3.connection.Key(bucket, name)
-                bucket.delete_key(k)
-            except boto.exception.S3ResponseError, e:
-                if e.status == 404:
-                    # Key is already not present.  Continue the
-                    # deletion iteration.
-                    break
-
-                raise
-            else:
-                break
+    for key in bucket.objects.all():
+        if key in keys:
+            key.delete()
 
 
 def apathetic_bucket_delete(bucket_name, keys, *args, **kwargs):
-    conn = boto.s3.connection.S3Connection(*args, **kwargs)
-    bucket = conn.lookup(bucket_name)
+    conn = boto3.client('s3', *args, **kwargs)
 
-    if bucket:
-        # Delete key names passed by the test code.
-        _delete_keys(conn.lookup(bucket_name), keys)
-
-    try:
-        conn.delete_bucket(bucket_name)
-    except boto.exception.S3ResponseError, e:
-        if e.status == 404:
-            # If the bucket is already non-existent, then the bucket
-            # need not be destroyed from a prior test run.
-            pass
-        else:
-            raise
+    if bucket_exists(conn, bucket_name):
+        conn.delete_bucket(Bucket=bucket_name)
 
     return conn
 
 
 def insistent_bucket_delete(conn, bucket_name, keys):
-    bucket = conn.lookup(bucket_name)
-
-    if bucket:
-        # Delete key names passed by the test code.
-        _delete_keys(bucket, keys)
+    if bucket_exists(conn, bucket_name):
+        _delete_keys(conn.Bucket(bucket_name), keys)
 
     while True:
         try:
-            conn.delete_bucket(bucket_name)
-        except boto.exception.S3ResponseError, e:
-            if e.status == 404:
+            conn.delete_bucket(Bucket=bucket_name)
+        except botocore.exceptions.ClientError as e:
+            if int(e.response['Error']['Code']) == 404:
                 # Create not yet visible, but it just happened above:
                 # keep trying.  Potential consistency.
                 continue
             else:
                 raise
-
         break
 
 
 def insistent_bucket_create(conn, bucket_name, *args, **kwargs):
     while True:
         try:
-            bucket = conn.create_bucket(bucket_name, *args, **kwargs)
-        except boto.exception.S3CreateError, e:
-            if e.status == 409:
+            conn.create_bucket(Bucket=bucket_name, *args, **kwargs)
+        except botocore.exceptions.ClientError as e:
+            if int(e.response['Error']['Code']) == 409:
                 # Conflict; bucket already created -- probably means
                 # the prior delete did not process just yet.
                 continue
 
             raise
 
-        return bucket
+        return conn.Bucket(bucket_name)
 
 
 class FreshBucket(object):
@@ -197,9 +162,7 @@ class FreshBucket(object):
         self.created_bucket = False
 
     def __enter__(self):
-        # Prefer using certs, when possible.
-        if boto_supports_certs():
-            self.conn_kwargs.setdefault('validate_certs', True)
+        self.conn_kwargs.setdefault('verify', True)
 
         # Clean up a dangling bucket from a previous test run, if
         # necessary.

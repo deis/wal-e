@@ -1,10 +1,9 @@
-import collections
+from gcloud import storage
+from gcloud import exceptions
+from urlparse import urlparse
 import gevent
 import socket
 import traceback
-from urlparse import urlparse
-
-import botocore
 
 from . import calling_format
 from wal_e import files
@@ -15,51 +14,38 @@ from wal_e.retries import retry, retry_with_count
 
 logger = log_help.WalELogger(__name__)
 
-_Key = collections.namedtuple('_Key', ['size'])
 
-
-def _uri_to_bucket(creds, uri, conn=None):
-    assert uri.startswith('s3://')
+def _uri_to_blob(creds, uri, conn=None):
+    assert uri.startswith('gs://')
     url_tup = urlparse(uri)
     bucket_name = url_tup.netloc
-    conn = calling_format.CallingInfo().connect(creds)
-    return conn.Bucket(bucket_name)
+    if conn is None:
+        conn = calling_format.CallingInfo().connect(creds)
+    b = storage.Bucket(conn, name=bucket_name)
+    return storage.Blob(url_tup.path, b)
 
 
-def _uri_to_key(creds, uri, conn=None):
-    bucket = _uri_to_bucket(creds, uri, conn)
-    url_tup = urlparse(uri)
-    return bucket.Object(url_tup.path.lstrip('/'))
-
-
-def uri_put_file(creds, uri, fp, content_encoding=None):
-    # Per Boto 2.2.2, which will only read from the current file
-    # position to the end.  This manifests as successfully uploaded
-    # *empty* keys in S3 instead of the intended data because of how
-    # tempfiles are used (create, fill, submit to boto).
-    #
-    # It is presumed it is the caller's responsibility to rewind the
-    # file position, and since the whole program was written with this
-    # in mind, assert it as a precondition for using this procedure.
+def uri_put_file(creds, uri, fp, content_encoding=None, conn=None):
     assert fp.tell() == 0
+    blob = _uri_to_blob(creds, uri, conn=conn)
 
-    bucket = _uri_to_bucket(creds, uri)
+    fp.seek(0, 2)
+    size = fp.tell()
 
-    url_tup = urlparse(uri)
-
-    k = bucket.put_object(Key=url_tup.path.lstrip('/'), Body=fp)
-    return _Key(size=k.content_length)
+    fp.seek(0, 0)
+    blob.upload_from_file(fp, num_retries=0, size=size,
+                          content_type=content_encoding)
+    return blob
 
 
 def uri_get_file(creds, uri, conn=None):
-    k = _uri_to_key(creds, uri, conn=conn)
-    # boto3 returns a file descriptor, so we need to read it off the socket
-    return k.get()['Body'].read()
+    blob = _uri_to_blob(creds, uri, conn=conn)
+    return blob.download_as_string()
 
 
 def do_lzop_get(creds, url, path, decrypt, do_retry=True):
     """
-    Get and decompress a S3 URL
+    Get and decompress a GCS URL
 
     This streams the content directly to lzop; the compressed version
     is never stored on disk.
@@ -81,7 +67,8 @@ def do_lzop_get(creds, url, path, decrypt, do_retry=True):
             logger.info(
                 msg='Retrying fetch because of a socket error',
                 detail=standard_detail_message(
-                    "The socket error's message is '{0}'.".format(socketmsg)))
+                    "The socket error's message is '{0}'."
+                    .format(socketmsg)))
         else:
             # For all otherwise untreated exceptions, report them as a
             # warning and retry anyway -- all exceptions that can be
@@ -100,32 +87,31 @@ def do_lzop_get(creds, url, path, decrypt, do_retry=True):
 
     def download():
         with files.DeleteOnError(path) as decomp_out:
-            key = _uri_to_key(creds, url)
+            blob = _uri_to_blob(creds, url)
             with get_download_pipeline(PIPE, decomp_out.f, decrypt) as pl:
-                g = gevent.spawn(write_and_return_error, key, pl.stdin)
+                g = gevent.spawn(write_and_return_error, blob, pl.stdin)
 
                 try:
                     # Raise any exceptions from write_and_return_error
                     exc = g.get()
                     if exc is not None:
                         raise exc
-                except botocore.exceptions.ClientError, e:
-                    if e.response['Error']['Code'] == 'NoSuchKey':
-                        # Do not retry if the key not present, this
-                        # can happen under normal situations.
-                        pl.abort()
-                        logger.warning(
-                            msg=('could no longer locate object while '
-                                 'performing wal restore'),
-                            detail=('The absolute URI that could not be '
-                                    'located is {url}.'.format(url=url)),
-                            hint=('This can be normal when Postgres is trying '
-                                  'to detect what timelines are available '
-                                  'during restoration.'))
-                        decomp_out.remove_regardless = True
-                        return False
-                    else:
-                        raise
+                except exceptions.NotFound:
+                    # Do not retry if the blob not present, this
+                    # can happen under normal situations.
+                    pl.abort()
+                    logger.warning(
+                        msg=('could no longer locate object while '
+                             'performing wal restore'),
+                        detail=('The absolute URI that could not be '
+                                'located is {url}.'.format(url=url)),
+                        hint=('This can be normal when Postgres is trying '
+                              'to detect what timelines are available '
+                              'during restoration.'))
+                    decomp_out.remove_regardless = True
+                    return False
+                except:
+                    raise
 
             logger.info(
                 msg='completed download and decompression',
@@ -140,9 +126,9 @@ def do_lzop_get(creds, url, path, decrypt, do_retry=True):
     return download()
 
 
-def write_and_return_error(key, stream):
+def write_and_return_error(blob, stream):
     try:
-        stream.write(key.get()['Body'].read())
+        stream.write(blob.download_as_string())
         stream.flush()
     except Exception, e:
         return e

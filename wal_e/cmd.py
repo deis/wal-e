@@ -190,10 +190,17 @@ def build_parser():
                            'the one defined in the programs arguments takes '
                            'precedence.')
 
-    aws_group.add_argument('--aws-instance-profile', action='store_true',
-                           help='Use the IAM Instance Profile associated '
-                           'with this instance to authenticate with the S3 '
-                           'API.')
+    gs_group = parser.add_mutually_exclusive_group()
+    gs_group.add_argument('--gs-application-creds',
+                          help='path to service account json. Can also be '
+                          'defined in an environment variable. If both are '
+                          'defined, the one defined in the programs arguments '
+                          'takes precedence.')
+
+    gs_group.add_argument('--gs-instance-metadata', action='store_true',
+                          help='Use the GCE Metadata server associated '
+                          'with this instance to authenticate with the GS '
+                          'API.')
 
     parser.add_argument('-a', '--wabs-account-name',
                         help='Account name of Windows Azure Blob Service '
@@ -210,6 +217,11 @@ def build_parser():
                         help='Storage prefix to run all commands against.  '
                         'Can also be defined via environment variable '
                         'WALE_WABS_PREFIX.')
+
+    parser.add_argument('--gs-prefix',
+                        help='Storage prefix to run all commands against. '
+                        'Can also be defined via environment variable '
+                        'WALE_GS_PREFIX.')
 
     parser.add_argument(
         '--gpg-key-id',
@@ -407,26 +419,36 @@ def s3_explicit_creds(args):
     return s3.Credentials(access_key, secret_key, security_token)
 
 
-def s3_instance_profile(args):
-    from wal_e.blobstore import s3
+def gs_creds(args):
+    from wal_e.blobstore import gs
 
-    assert args.aws_instance_profile
-    return s3.InstanceProfileCredentials()
+    if args.gs_instance_metadata:
+        service_account = None
+    else:
+        service_account = (args.gs_application_creds
+                            or os.getenv('GS_APPLICATION_CREDS'))
+        if service_account is None:
+            raise UserException(
+                msg='GS service account is required but not provided',
+                hint=(_config_hint_generate('gs-application-creds', True)))
+
+    return gs.Credentials(service_account)
 
 
 def configure_backup_cxt(args):
     # Try to find some WAL-E prefix to store data in.
-    prefix = (args.s3_prefix or args.wabs_prefix
+    prefix = (args.s3_prefix or args.wabs_prefix or args.gs_prefix
               or os.getenv('WALE_S3_PREFIX') or os.getenv('WALE_WABS_PREFIX')
-              or os.getenv('WALE_SWIFT_PREFIX'))
+              or os.getenv('WALE_GS_PREFIX') or os.getenv('WALE_SWIFT_PREFIX'))
 
     if prefix is None:
         raise UserException(
             msg='no storage prefix defined',
             hint=(
-                'Either set one of the --wabs-prefix or --s3-prefix options or'
-                ' define one of the WALE_WABS_PREFIX, WALE_S3_PREFIX, or '
-                'WALE_SWIFT_PREFIX environment variables.'
+                'Either set one of the --wabs-prefix, --s3-prefix or '
+                '--gs-prefix options or define one of the WALE_WABS_PREFIX, '
+                'WALE_S3_PREFIX, WALE_SWIFT_PREFIX or WALE_GS_PREFIX '
+                'environment variables.'
             )
         )
 
@@ -442,14 +464,12 @@ def configure_backup_cxt(args):
     # backend data stores, yielding value adhering to the
     # 'operator.Backup' protocol.
     if store.is_s3:
-        if args.aws_instance_profile:
-            creds = s3_instance_profile(args)
-        else:
-            creds = s3_explicit_creds(args)
+        # we aren't using the creds anywhere and we just get the credentials from the environment
+        # creds = s3_explicit_creds(args)
 
         from wal_e.operator import s3_operator
 
-        return s3_operator.S3Backup(store, creds, gpg_key_id)
+        return s3_operator.S3Backup(store, None, gpg_key_id)
     elif store.is_wabs:
         account_name = args.wabs_account_name or os.getenv('WABS_ACCOUNT_NAME')
         if account_name is None:
@@ -458,15 +478,19 @@ def configure_backup_cxt(args):
                 hint=_config_hint_generate('wabs-account-name', True))
 
         access_key = os.getenv('WABS_ACCESS_KEY')
-        if access_key is None:
+        access_token = os.getenv('WABS_SAS_TOKEN')
+        if not (access_key or access_token):
             raise UserException(
-                msg='WABS access key credential is required but not provided',
-                hint=_config_hint_generate('wabs-access-key', False))
+                msg='WABS access credentials is required but not provided',
+                hint=(
+                    'Define one of the WABS_ACCOUNT_KEY or '
+                    'WABS_SAS_TOKEN environment variables.'
+                ))
 
         from wal_e.blobstore import wabs
         from wal_e.operator.wabs_operator import WABSBackup
 
-        creds = wabs.Credentials(account_name, access_key)
+        creds = wabs.Credentials(account_name, access_key, access_token)
 
         return WABSBackup(store, creds, gpg_key_id)
     elif store.is_swift:
@@ -483,6 +507,10 @@ def configure_backup_cxt(args):
             os.getenv('SWIFT_AUTH_VERSION', '2'),
         )
         return SwiftBackup(store, creds, gpg_key_id)
+    elif store.is_gs:
+        creds = gs_creds(args)
+        from wal_e.operator.gs_operator import GSBackup
+        return GSBackup(store, creds, gpg_key_id)
     else:
         raise UserCritical(
             msg='no unsupported blob stores should get here',
@@ -608,6 +636,7 @@ def main():
 
                 boto.s3.key.Key.delete = just_error
                 boto.s3.bucket.Bucket.delete_keys = just_error
+                boto.s3.bucket.Bucket.delete_key = just_error
 
             # Handle the subcommands and route them to the right
             # implementations.

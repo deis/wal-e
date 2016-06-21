@@ -3,8 +3,6 @@ import socket
 import tempfile
 import time
 
-import boto.exception
-
 from wal_e import log_help
 from wal_e import pipebuf
 from wal_e import pipeline
@@ -121,12 +119,6 @@ class PartitionUploader(object):
                         detail=standard_detail_message(
                             "The socket error's message is '{0}'."
                             .format(socketmsg)))
-                elif (issubclass(typ, boto.exception.S3ResponseError) and
-                      value.error_code == 'RequestTimeTooSkewed'):
-                    logger.info(
-                        msg='Retrying send because of a Request Skew time',
-                        detail=standard_detail_message())
-
                 else:
                     # This type of error is unrecognized as a retry-able
                     # condition, so propagate it, original stacktrace and

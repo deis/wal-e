@@ -41,8 +41,22 @@ based settings:
 * AWS_SECRET_ACCESS_KEY or WABS_ACCESS_KEY
 * WALE_S3_PREFIX or WALE_WABS_PREFIX
 
+For Google Storage the following environment variables are needed:
+
+* WALE_GS_PREFIX (e.g. ``gs://bucket/path/optionallymorepath``)
+* GOOGLE_APPLICATION_CREDENTIALS
+
+* WALE_WABS_PREFIX (e.g. ``wabs://container/path/optionallymorepath``)
+* WABS_ACCOUNT_NAME
+* WABS_ACCESS_KEY or
+* WABS_SAS_TOKEN
+
+Swift
+'''''
+
 For Swift the following environment variables are needed:
 
+* WALE_SWIFT_PREFIX (e.g. ``swift://container/path/optionallymorepath``)
 * SWIFT_AUTHURL
 * SWIFT_TENANT
 * SWIFT_USER
@@ -92,6 +106,7 @@ will attempt to resolve them:
 * gevent>=0.13.1
 * boto>=2.6.0
 * azure>=0.7.0
+* gcloud>=0.11.0
 * python-swiftclient>=1.8.0
 * python-keystoneclient>=0.4.2
 * argparse, if not on Python 2.7
@@ -146,6 +161,12 @@ Push a base backup to Swift::
     SWIFT_USER="my_user"                                       \
     SWIFT_PASSWORD="my_password" wal-e                         \
     backup-push /var/lib/my/database
+
+Push a base backup to Google Cloud Storage::
+
+  $ WALE_GS_PREFIX="gs://some-bucket/directory-or-whatever"     \
+    GS_APPLICATION_CREDS=...                          \
+    wal-e backup-push /var/lib/my/database
 
 It is generally recommended that one use some sort of environment
 variable management with WAL-E: working with it this way is less verbose,
@@ -630,6 +651,17 @@ Example::
   # As seen when using Deis, which uses radosgw.
   WALE_S3_ENDPOINT=http+path://deis-store-gateway:8888
 
+Using GCE VM Instance Metadata Service
+''''''''''''''''''''''''''''''''''''''
+
+Similar to using IAM instance profiles on AWS (described above), WAL-E
+would benefit from use with the `GCE Metadata Service`_, which
+supplies access credentials for a GCE service account associated witht
+he VM instance.
+
+To instruct WAL-E to use these credentials for access to GS, pass the
+``--gs-instance-metadata`` flag.
+
 Development
 -----------
 
@@ -695,3 +727,4 @@ preference for pytest_ idiom be an impediment to submitting code.
 .. _pytest: https://pypi.python.org/pypi/pytest
 .. _unittest: http://docs.python.org/2/library/unittest.html
 .. _pytest-cov: https://pypi.python.org/pypi/pytest-cov
+.. _GCE Metadata Service: https://cloud.google.com/compute/docs/metadata

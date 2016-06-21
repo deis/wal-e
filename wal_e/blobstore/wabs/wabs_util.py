@@ -1,17 +1,29 @@
-import base64
 import collections
-import errno
 import gevent
-import os
 import socket
-import sys
 import traceback
 
-from azure import WindowsAzureMissingResourceError
-from azure.storage import BlobService
+try:
+    # New class name in the Azure SDK sometime after v1.0.
+    #
+    # See
+    # https://github.com/Azure/azure-sdk-for-python/blob/master/ChangeLog.txt
+    from azure.common import AzureMissingResourceHttpError
+except ImportError:
+    # Backwards compatbility for older Azure drivers.
+    from azure import WindowsAzureMissingResourceError \
+        as AzureMissingResourceHttpError
+
+try:
+    # New module location sometime after Azure SDK v1.0.
+    #
+    # See
+    # https://github.com/Azure/azure-sdk-for-python/blob/master/ChangeLog.txt
+    from azure.storage.blob import BlobService
+except ImportError:
+    from azure.storage import BlobService
 
 from . import calling_format
-from hashlib import md5
 from urlparse import urlparse
 from wal_e import log_help
 from wal_e import files
@@ -77,7 +89,9 @@ def uri_put_file(creds, uri, fp, content_encoding=None):
     if content_encoding is not None:
         kwargs['x_ms_blob_content_encoding'] = content_encoding
 
-    conn = BlobService(creds.account_name, creds.account_key, protocol='https')
+    conn = BlobService(
+        creds.account_name, creds.account_key,
+        sas_token=creds.access_token, protocol='https')
     conn.put_blob(url_tup.netloc, url_tup.path, '', **kwargs)
 
     # WABS requires large files to be uploaded in 4MB chunks
@@ -112,7 +126,7 @@ def uri_get_file(creds, uri, conn=None):
 
     if conn is None:
         conn = BlobService(creds.account_name, creds.account_key,
-                           protocol='https')
+                           sas_token=creds.access_token, protocol='https')
 
     # Determin the size of the target blob
     props = conn.get_blob_properties(url_tup.netloc, url_tup.path)
@@ -167,7 +181,9 @@ def do_lzop_get(creds, url, path, decrypt, do_retry=True):
     assert url.endswith('.lzo'), 'Expect an lzop-compressed file'
     assert url.startswith('wabs://')
 
-    conn = BlobService(creds.account_name, creds.account_key, protocol='https')
+    conn = BlobService(
+        creds.account_name, creds.account_key,
+        sas_token=creds.access_token, protocol='https')
 
     def log_wal_fetch_failures_on_error(exc_tup, exc_processor_cxt):
         def standard_detail_message(prefix=''):
@@ -212,7 +228,7 @@ def do_lzop_get(creds, url, path, decrypt, do_retry=True):
                     exc = g.get()
                     if exc is not None:
                         raise exc
-                except WindowsAzureMissingResourceError:
+                except AzureMissingResourceHttpError:
                     # Short circuit any re-try attempts under certain race
                     # conditions.
                     pl.abort()
