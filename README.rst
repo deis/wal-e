@@ -46,8 +46,17 @@ For Google Storage the following environment variables are needed:
 * WALE_GS_PREFIX (e.g. ``gs://bucket/path/optionallymorepath``)
 * GOOGLE_APPLICATION_CREDENTIALS
 
+* WALE_WABS_PREFIX (e.g. ``wabs://container/path/optionallymorepath``)
+* WABS_ACCOUNT_NAME
+* WABS_ACCESS_KEY or
+* WABS_SAS_TOKEN
+
+Swift
+'''''
+
 For Swift the following environment variables are needed:
 
+* WALE_SWIFT_PREFIX (e.g. ``swift://container/path/optionallymorepath``)
 * SWIFT_AUTHURL
 * SWIFT_TENANT
 * SWIFT_USER
@@ -96,7 +105,7 @@ will attempt to resolve them:
 
 * gevent>=0.13.1
 * boto>=2.6.0
-* azure-storage>=0.30.0
+* azure>=0.7.0
 * gcloud>=0.11.0
 * python-swiftclient>=1.8.0
 * python-keystoneclient>=0.4.2
