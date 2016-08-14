@@ -20,10 +20,10 @@ def bucket_name_mangle(bn, delimiter='-'):
 def compute_mangle_suffix():
     with open(os.getenv('GOOGLE_APPLICATION_CREDENTIALS')) as f:
         cj = json.load(f)
-        dm = hmac.new('wal-e-tests')
-        dm.update(cj['client_id'])
+        dm = hmac.new(b'wal-e-tests')
+        dm.update(cj['client_id'].encode('utf-8'))
         dg = dm.digest()
-        return base64.b32encode(dg[:10]).lower()
+        return base64.b32encode(dg[:10]).decode('utf-8').lower()
 
 
 def no_real_gs_credentials():
@@ -78,13 +78,16 @@ def default_test_gs_bucket():
 
 def apathetic_bucket_delete(bucket_name, blobs, *args, **kwargs):
     conn = storage.Client()
-    bucket = storage.Bucket(bucket_name, conn)
+    bucket = storage.Bucket(conn, name=bucket_name)
 
     if bucket:
         # Delete key names passed by the test code.
         bucket.delete_blobs(blobs)
 
-    bucket.delete()
+    try:
+        bucket.delete()
+    except exceptions.NotFound:
+        pass
 
     return conn
 
@@ -98,7 +101,7 @@ def insistent_bucket_delete(conn, bucket_name, blobs):
 
     while True:
         try:
-            conn.delete_bucket(bucket_name)
+            bucket.delete()
         except exceptions.NotFound:
             continue
 

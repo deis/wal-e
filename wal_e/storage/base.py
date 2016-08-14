@@ -11,7 +11,7 @@ import collections
 
 import wal_e.exception
 
-from urlparse import urlparse
+from urllib.parse import urlparse
 
 
 CURRENT_VERSION = '005'
@@ -303,11 +303,7 @@ class StorageLayout(object):
         return self._url_tup.netloc
 
     def key_name(self, key):
-        if self.is_s3:
-            name = key.key
-        else:
-            name = key.name
-        return name.lstrip('/')
+        return key.name.lstrip('/')
 
     def key_last_modified(self, key):
         if hasattr(key, 'last_modified'):

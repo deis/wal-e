@@ -1,27 +1,21 @@
-from oauth2client.service_account import ServiceAccountCredentials
 from gcloud.storage.connection import Connection
-from gcloud.storage.client import Client
+from gcloud.credentials import get_credentials
+from gcloud import storage
+
 from gevent.local import local
 from httplib2 import Http
 
-import json
 
+def connect(creds):
+    """Construct a connection value to Google Storage API
 
-class CallingInfo(object):
-    """Encapsulate information used to produce a GCS Connection."""
+    The credentials are retrieved using get_credentials that checks
+    the environment for the correct values.
 
-    def __str__(self):
-        return repr(self)
-
-    def connect(self, creds):
-        scopes = ['https://www.googleapis.com/auth/devstorage.full_control']
-        credentials = ServiceAccountCredentials.from_json_keyfile_name(
-            creds.service_account, scopes=scopes)
-        with open(creds.service_account) as data_file:
-            data = json.load(data_file)
-        client = Client(credentials=credentials, project=data['project_id'],
-                http=ThreadSafeHttp(credentials))
-        return client
+    """
+    credentials = get_credentials()
+    return storage.Client(credentials=credentials,
+                          http=ThreadSafeHttp(credentials))
 
 
 class ThreadSafeHttp(object):

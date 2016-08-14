@@ -1,5 +1,6 @@
 import csv
 import datetime
+import os
 
 from subprocess import PIPE
 
@@ -41,10 +42,14 @@ def psql_csv_run(sql_command, error_handler=None):
     csv_query = ('COPY ({query}) TO STDOUT WITH CSV HEADER;'
                  .format(query=sql_command))
 
+    new_env = os.environ.copy()
+    new_env.setdefault('PGOPTIONS', '')
+    new_env["PGOPTIONS"] += ' --statement-timeout=0'
     psql_proc = popen_nonblock([PSQL_BIN, '-d', 'postgres', '--no-password',
-                                '-c', csv_query],
-                               stdout=PIPE)
-    stdout = psql_proc.communicate()[0]
+                                '--no-psqlrc', '-c', csv_query],
+                               stdout=PIPE,
+                               env=new_env)
+    stdout = psql_proc.communicate()[0].decode('utf-8')
 
     if psql_proc.returncode != 0:
         if error_handler is not None:
@@ -78,7 +83,7 @@ class PgBackupStatements(object):
     def _dict_transform(csv_reader):
         rows = list(csv_reader)
         assert len(rows) == 2, 'Expect header row and data row'
-        return dict(zip(*rows))
+        return dict(list(zip(*rows)))
 
     @classmethod
     def run_start_backup(cls):

@@ -1,6 +1,6 @@
 import socket
 import traceback
-from urlparse import urlparse
+from urllib.parse import urlparse
 
 import gevent
 
@@ -147,7 +147,7 @@ def write_and_return_error(uri, conn, stream):
         for chunk in response:
             stream.write(chunk)
         stream.flush()
-    except Exception, e:
+    except Exception as e:
         return e
     finally:
         stream.close()

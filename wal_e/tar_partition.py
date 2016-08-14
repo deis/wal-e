@@ -44,6 +44,7 @@ import collections
 import errno
 import os
 import tarfile
+import sys
 
 from wal_e import files
 from wal_e import log_help
@@ -88,7 +89,7 @@ class StreamPadFileObj(object):
         ret = self.underlying_fp.read(max_readable)
         lenret = len(ret)
         self.pos += lenret
-        return ret + '\0' * (max_readable - lenret)
+        return ret + b'\0' * (max_readable - lenret)
 
     def close(self):
         return self.underlying_fp.close()
@@ -216,7 +217,11 @@ def cat_extract(tar, member, targetpath):
             fp = tar.extractfile(member)
             copyfileobj.copyfileobj(fp, pl.stdin)
 
-    tar.chown(member, targetpath)
+    if sys.version_info < (3, 5):
+        tar.chown(member, targetpath)
+    else:
+        tar.chown(member, targetpath, False)
+
     tar.chmod(member, targetpath)
     tar.utime(member, targetpath)
 
@@ -235,7 +240,7 @@ class TarPartition(list):
                                       et_info.tarinfo.size) as f:
                     tar.addfile(et_info.tarinfo, f)
 
-        except EnvironmentError, e:
+        except EnvironmentError as e:
             if (e.errno == errno.ENOENT and
                 e.filename == et_info.submitted_path):
                 # log a NOTICE/INFO that the file was unlinked.
@@ -376,7 +381,7 @@ def _segmentation_guts(root, file_paths, max_partition_size):
                         file_path, arcname=file_path[len(root):]),
                     submitted_path=file_path)
 
-            except EnvironmentError, e:
+            except EnvironmentError as e:
                 if (e.errno == errno.ENOENT and
                     e.filename == file_path):
                     # log a NOTICE/INFO that the file was unlinked.
@@ -385,6 +390,7 @@ def _segmentation_guts(root, file_paths, max_partition_size):
                     logger.debug(
                         msg='tar member additions skipping an unlinked file',
                         detail='Skipping {0}.'.format(et_info.submitted_path))
+                    continue
                 else:
                     raise
 

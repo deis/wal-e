@@ -1,4 +1,12 @@
-from azure.storage.blob import BlockBlobService
+try:
+    # New module location sometime after Azure SDK v1.0.
+    #
+    # See
+    # https://github.com/Azure/azure-sdk-for-python/blob/master/ChangeLog.txt
+    from azure.storage.blob import BlobService
+except ImportError:
+    from azure.storage import BlobService
+
 import os
 
 
@@ -18,7 +26,7 @@ def no_real_wabs_credentials():
 
 
 def apathetic_container_delete(container_name, *args, **kwargs):
-    conn = BlockBlobService(*args, **kwargs)
+    conn = BlobService(*args, **kwargs)
     conn.delete_container(container_name)
 
     return conn

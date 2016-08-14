@@ -1,8 +1,8 @@
 WAL-E
 =====
-----------------------------------------
-Simple continuous archiving for Postgres
-----------------------------------------
+---------------------------------
+Continuous archiving for Postgres
+---------------------------------
 
 WAL-E is a program designed to perform continuous archiving of
 PostgreSQL WAL files and base backups.
@@ -22,65 +22,81 @@ so please feel free to submit those.
 Primary Commands
 ----------------
 
-WAL-E has four key commands:
+WAL-E has these key commands:
 
 * backup-fetch
 * backup-push
 * wal-fetch
 * wal-push
+* `delete`_
+
+All of these operators work in a context of several environment
+variables that WAL-E reads.  The variables set depend on the storage
+provider being used, and are detailed below.
+
+WAL-E's organizing concept is the `PREFIX`.  Prefixes must be set
+uniquely for each *writing* database, and prefix all objects stored
+for a given database.  For example: ``s3://bucket/databasename``.
 
 Of these, the "push" operators send backup data to storage and "fetch"
-operators get backup data from storage.  "wal" operators send/get
-write ahead log, and "backup" send/get a hot backup of the base
-database that WAL segments can be applied to.
+operators get backup data from storage.
 
-All of these operators work in a context of three environment-variable
-based settings:
+``wal`` commands are called by Postgres's ``archive_command`` and
+``restore_command`` to fetch or pull write ahead log, and ``backup``
+commands are used to fetch or push a hot backup of the base database
+that WAL segments can be applied to.  Finally, the ``delete`` command
+is used to prune the archives as to retain a finite number of backups.
 
-* AWS_ACCESS_KEY_ID or WABS_ACCOUNT_NAME
-* AWS_SECRET_ACCESS_KEY or WABS_ACCESS_KEY
-* WALE_S3_PREFIX or WALE_WABS_PREFIX
+AWS S3 and Work-alikes
+''''''''''''''''''''''
 
-For Google Storage the following environment variables are needed:
+* WALE_S3_PREFIX (e.g. ``s3://bucket/path/optionallymorepath``)
+* AWS_ACCESS_KEY_ID
+* AWS_SECRET_ACCESS_KEY
+* AWS_REGION (e.g. ``us-east-1``)
+
+Optional:
+
+* WALE_S3_ENDPOINT: See `Manually specifying the S3 Endpoint`_
+* AWS_SECURITY_TOKEN: When using AWS STS
+* Pass ``--aws-instance-profile`` to gather credentials from the
+  Instance Profile.  See `Using AWS IAM Instance Profiles`.
+
+Azure Blob Store
+''''''''''''''''
+
+* WALE_WABS_PREFIX (e.g. ``wabs://container/path/optionallymorepath``)
+* WABS_ACCOUNT_NAME
+* WABS_ACCESS_KEY or
+* WABS_SAS_TOKEN
+
+Google Storage
+''''''''''''''
 
 * WALE_GS_PREFIX (e.g. ``gs://bucket/path/optionallymorepath``)
 * GOOGLE_APPLICATION_CREDENTIALS
 
-For Swift the following environment variables are needed:
+Swift
+'''''
 
+* WALE_SWIFT_PREFIX (e.g. ``swift://container/path/optionallymorepath``)
 * SWIFT_AUTHURL
 * SWIFT_TENANT
 * SWIFT_USER
 * SWIFT_PASSWORD
-* WALE_SWIFT_PREFIX
 
-There are also these variables:
+Optional Variables:
 
-* SWIFT_AUTH_VERSION which defaults to 2. Some object stores such as
-  Softlayer require version 1.
-* SWIFT_ENDPOINT_TYPE defaults to publicURL, this may be set to internalURL on
-  object stores like Rackspace Cloud Files in order to use the internal
-  network.
-
-With the exception of AWS_SECRET_ACCESS_KEY and WABS_ACCESS_KEY, all
-of these can be specified as arguments as well.  The AWS_* variables
-are the standard access-control keying system provided by Amazon,
-where the WABS_* are the standard access credentials defined by
-Windows Azure.
-
-The WALE_S3_PREFIX, WALE_WABS_PREFIX and WALE_SWIFT_PREFIX (_PREFIX)
-variables can be thought of as a context whereby this program operates
-on a single database cluster at a time.  Generally, for any one
-database the _PREFIX will be the same between all four operators.
-This context-driven approach attempts to help users avoid errors such
-as one database overwriting the WAL segments of another, as long as
-the _PREFIX is set uniquely for each database. Use whichever variable
-is appropriate for the store you are using.
+* SWIFT_AUTH_VERSION which defaults to ``2``. Some object stores such as
+  Softlayer require version ``1``.
+* SWIFT_ENDPOINT_TYPE defaults to ``publicURL``, this may be set to
+  ``internalURL`` on object stores like Rackspace Cloud Files in order
+  to use the internal network.
 
 .. IMPORTANT::
-   Ensure that all servers have different _PREFIXes set.
-   Reuse of a value between two servers will likely cause unrecoverable
-   backups.
+   Ensure that all writing servers have different _PREFIXes set.
+   Reuse of a value between two, writing databases will likely cause
+   unrecoverable backups.
 
 
 Dependencies
@@ -94,10 +110,10 @@ Dependencies
 This software also has Python dependencies: installing with ``pip``
 will attempt to resolve them:
 
-* gevent>=0.13.1
-* boto>=2.6.0
-* azure-storage>=0.30.0
-* gcloud>=0.11.0
+* gevent>=1.0.2
+* boto>=2.24.0
+* azure>=0.7.0
+* gcloud>=0.8.0
 * python-swiftclient>=1.8.0
 * python-keystoneclient>=0.4.2
 * argparse, if not on Python 2.7
@@ -105,27 +121,6 @@ will attempt to resolve them:
 It is possible to use WAL-E without the dependencies of back-end
 storage one does not use installed: the imports for those are only
 performed if the storage configuration demands their use.
-
-Backend Blob Store
-------------------
-
-The storage backend is determined by the defined _PREFIX. Prefixes with the
-scheme ``s3`` will be directed towards S3, those with the scheme ``wabs`` will
-be directed towards Windows Azure Blob Service, and those with the scheme
-``swift`` will be directed towards an OpenStack Swift installation.
-
-Example S3 Prefix:
-
-  s3://some-bucket/directory/or/whatever
-
-Example WABS Prefix:
-
-  wabs://some-container/directory/or/whatever
-
-Example OpenStack Swift Prefix:
-
-  swift://some-container/directory/or/whatever
-
 
 Examples
 --------
@@ -156,20 +151,13 @@ Push a base backup to Swift::
 Push a base backup to Google Cloud Storage::
 
   $ WALE_GS_PREFIX="gs://some-bucket/directory-or-whatever"     \
-    GS_APPLICATION_CREDS=...                          \
+    GOOGLE_APPLICATION_CREDENTIALS=...                          \
     wal-e backup-push /var/lib/my/database
 
 It is generally recommended that one use some sort of environment
 variable management with WAL-E: working with it this way is less verbose,
 less prone to error, and less likely to expose secret information in
 logs.
-
-At this time, AWS_SECRET_ACCESS_KEY and WABS_ACCESS_KEY are the only
-secret values, and recording it frequently in logs is not recommended.
-The tool has never and should never accept secret information in argv
-to avoid process table security problems.  However, the user running
-PostgreSQL (typically 'postgres') must be able to run a program that
-can access this secret information, as part of its archive_command_.
 
 .. _archive_command: http://www.postgresql.org/docs/8.3/static/runtime-config-wal.html#GUC-ARCHIVE-COMMAND>
 
@@ -642,17 +630,6 @@ Example::
   # As seen when using Deis, which uses radosgw.
   WALE_S3_ENDPOINT=http+path://deis-store-gateway:8888
 
-Using GCE VM Instance Metadata Service
-''''''''''''''''''''''''''''''''''''''
-
-Similar to using IAM instance profiles on AWS (described above), WAL-E
-would benefit from use with the `GCE Metadata Service`_, which
-supplies access credentials for a GCE service account associated witht
-he VM instance.
-
-To instruct WAL-E to use these credentials for access to GS, pass the
-``--gs-instance-metadata`` flag.
-
 Development
 -----------
 
@@ -661,16 +638,13 @@ the development environment.  All additional dependencies of WAL-E are
 managed by tox_.  In addition, the coding conventions are checked by
 the tox_ configuration included with WAL-E.
 
-To run the tests, one need only run::
+To run the tests, run::
 
   $ tox -e py27
 
-There are a variety of other environments tested by ``tox`` handling
-old and new library versions, but ``-e py27`` is normally the
-environment one should iterate with.
-
 To run a somewhat more lengthy suite of integration tests that
-communicate with AWS S3, one might run tox_ like this::
+communicate with a real blob store account, one might run tox_ like
+this::
 
   $ WALE_S3_INTEGRATION_TESTS=TRUE      \
     AWS_ACCESS_KEY_ID=[AKIA...]         \
@@ -678,6 +652,8 @@ communicate with AWS S3, one might run tox_ like this::
     WALE_WABS_INTEGRATION_TESTS=TRUE    \
     WABS_ACCOUNT_NAME=[...]             \
     WABS_ACCESS_KEY=[...]               \
+    WALE_GS_INTEGRATION_TESTS=TRUE      \
+    GOOGLE_APPLICATION_CREDENTIALS=[~/my-credentials.json] \
     tox -e py27 -- -n 8
 
 Looking carefully at the above, notice the ``-n 8`` added the tox_
@@ -690,32 +666,11 @@ tests complete a small fraction of the time it would take otherwise.
 It is a design requirement of new tests that parallel execution not be
 sacrificed.
 
-The above invocation tests WAL-E with every test environment
-defined in ``tox.ini``.  When iterating, testing all of those is
-typically not a desirable use of time, so one can restrict the
-integration test to one virtual environment, in a combination of
-features seen in all the previous examples::
-
-  $ WALE_S3_INTEGRATION_TESTS=TRUE      \
-    AWS_ACCESS_KEY_ID=[AKIA...]         \
-    AWS_SECRET_ACCESS_KEY=[...]         \
-    WALE_WABS_INTEGRATION_TESTS=TRUE    \
-    WABS_ACCOUNT_NAME=[...]             \
-    WABS_ACCESS_KEY=[...]               \
-    tox -e py27 -- -n 8
-
 Coverage testing can be used by combining any of these using
 pytest-cov_, e.g.: ``tox -- --cov wal_e`` and
 ``tox -- --cov wal_e --cov-report html; see htmlcov/index.html``.
-
-Finally, the test framework used is pytest_.  If possible, do not
-submit Python unittest_ style tests: those tend to be more verbose and
-anemic in power; however, any automated testing is better than a lack
-thereof, so if you are familiar with unittest_, do not let the
-preference for pytest_ idiom be an impediment to submitting code.
 
 .. _tox: https://pypi.python.org/pypi/tox
 .. _pytest: https://pypi.python.org/pypi/pytest
 .. _unittest: http://docs.python.org/2/library/unittest.html
 .. _pytest-cov: https://pypi.python.org/pypi/pytest-cov
-.. _GCE Metadata Service: https://cloud.google.com/compute/docs/metadata

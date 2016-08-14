@@ -18,77 +18,61 @@ def gevent_monkey(*args, **kwargs):
 # sadly it cannot be used (easily) in WAL-E.
 gevent_monkey()
 
-# Instate a cipher suite that bans a series of weak and slow ciphers.
-# Both RC4 (weak) 3DES (slow) have been seen in use.
-#
-# Only Python 2.7+ possesses the 'ciphers' keyword to wrap_socket.
-if sys.version_info >= (2, 7):
-    def getresponse_monkey():
-        import httplib
-        original = httplib.HTTPConnection.getresponse
 
-        def monkey(*args, **kwargs):
-            kwargs['buffering'] = True
-            return original(*args, **kwargs)
+def ssl_monkey():
+    import ssl
 
-        httplib.HTTPConnection.getresponse = monkey
+    original = ssl.wrap_socket
 
-    getresponse_monkey()
+    def wrap_socket_monkey(*args, **kwargs):
+        # Set up an OpenSSL cipher string.
+        #
+        # Rationale behind each part:
+        #
+        # * HIGH: only use the most secure class of ciphers and
+        #   key lengths, generally being 128 bits and larger.
+        #
+        # * !aNULL: exclude cipher suites that contain anonymous
+        #   key exchange, making man in the middle attacks much
+        #   more tractable.
+        #
+        # * !SSLv2: exclude any SSLv2 cipher suite, as this
+        #   category has security weaknesses.  There is only one
+        #   OpenSSL cipher suite that is in the "HIGH" category
+        #   but uses SSLv2 protocols: DES_192_EDE3_CBC_WITH_MD5
+        #   (see s2_lib.c)
+        #
+        #   Technically redundant given "!3DES", but the intent in
+        #   listing it here is more apparent.
+        #
+        # * !RC4: exclude because it's a weak block cipher.
+        #
+        # * !3DES: exclude because it's very CPU intensive and
+        #   most peers support another reputable block cipher.
+        #
+        # * !MD5: although it doesn't seem use of known flaws in
+        #   MD5 is able to compromise an SSL session, the wide
+        #   deployment of SHA-family functions means the
+        #   compatibility benefits of allowing it are slim to
+        #   none, so disable it until someone produces material
+        #   complaint.
+        kwargs['ciphers'] = 'HIGH:!aNULL:!SSLv2:!RC4:!3DES:!MD5'
+        return original(*args, **kwargs)
 
-    def ssl_monkey():
-        import ssl
+    ssl.wrap_socket = wrap_socket_monkey
 
-        original = ssl.wrap_socket
-
-        def wrap_socket_monkey(*args, **kwargs):
-            # Set up an OpenSSL cipher string.
-            #
-            # Rationale behind each part:
-            #
-            # * HIGH: only use the most secure class of ciphers and
-            #   key lengths, generally being 128 bits and larger.
-            #
-            # * !aNULL: exclude cipher suites that contain anonymous
-            #   key exchange, making man in the middle attacks much
-            #   more tractable.
-            #
-            # * !SSLv2: exclude any SSLv2 cipher suite, as this
-            #   category has security weaknesses.  There is only one
-            #   OpenSSL cipher suite that is in the "HIGH" category
-            #   but uses SSLv2 protocols: DES_192_EDE3_CBC_WITH_MD5
-            #   (see s2_lib.c)
-            #
-            #   Technically redundant given "!3DES", but the intent in
-            #   listing it here is more apparent.
-            #
-            # * !RC4: exclude because it's a weak block cipher.
-            #
-            # * !3DES: exclude because it's very CPU intensive and
-            #   most peers support another reputable block cipher.
-            #
-            # * !MD5: although it doesn't seem use of known flaws in
-            #   MD5 is able to compromise an SSL session, the wide
-            #   deployment of SHA-family functions means the
-            #   compatibility benefits of allowing it are slim to
-            #   none, so disable it until someone produces material
-            #   complaint.
-            kwargs['ciphers'] = 'HIGH:!aNULL:!SSLv2:!RC4:!3DES:!MD5'
-            return original(*args, **kwargs)
-
-        ssl.wrap_socket = wrap_socket_monkey
-
-    ssl_monkey()
+ssl_monkey()
 
 import argparse
 import logging
 import os
 import re
+import subprocess
 import textwrap
 import traceback
 
 from wal_e import log_help
 
-from wal_e import subprocess
 from wal_e.exception import UserCritical
 from wal_e.exception import UserException
 from wal_e import storage
@@ -130,7 +114,7 @@ def external_program_check(
         raise EnvironmentError('INTERNAL: Had problems running psql '
                                'from external_program_check')
 
-    with open(os.devnull, 'w') as nullf:
+    with open(os.devnull, 'wb') as nullf:
         for program in to_check:
             try:
                 if program is PSQL_BIN:
@@ -190,17 +174,17 @@ def build_parser():
                            'the one defined in the programs arguments takes '
                            'precedence.')
 
-    gs_group = parser.add_mutually_exclusive_group()
-    gs_group.add_argument('--gs-application-creds',
-                          help='path to service account json. Can also be '
-                          'defined in an environment variable. If both are '
-                          'defined, the one defined in the programs arguments '
-                          'takes precedence.')
+    aws_group.add_argument('--aws-instance-profile', action='store_true',
+                           help='Use the IAM Instance Profile associated '
+                           'with this instance to authenticate with the S3 '
+                           'API.')
 
-    gs_group.add_argument('--gs-instance-metadata', action='store_true',
-                          help='Use the GCE Metadata server associated '
-                          'with this instance to authenticate with the GS '
-                          'API.')
+    gs_group = parser.add_mutually_exclusive_group()
+    gs_group.add_argument('--gs-access-key-id',
+                          help='public GS access key. Can also be defined '
+                          'in an environment variable. If both are defined, '
+                          'the one defined in the programs arguments takes '
+                          'precedence.')
 
     parser.add_argument('-a', '--wabs-account-name',
                         help='Account name of Windows Azure Blob Service '
@@ -290,7 +274,7 @@ def build_parser():
         parents=[wal_fetchpush_parent])
 
     wal_push_parser.add_argument(
-        '--pool-size', '-p', type=int, default=8,
+        '--pool-size', '-p', type=int, default=32,
         help='Set the maximum number of concurrent transfers')
 
     # backup-fetch operator section
@@ -419,20 +403,32 @@ def s3_explicit_creds(args):
     return s3.Credentials(access_key, secret_key, security_token)
 
 
+def s3_instance_profile(args):
+    from wal_e.blobstore import s3
+
+    assert args.aws_instance_profile
+    return s3.InstanceProfileCredentials()
+
+
 def gs_creds(args):
     from wal_e.blobstore import gs
 
     if args.gs_instance_metadata:
-        service_account = None
+        access_key, secret_key = None, None
     else:
-        service_account = (args.gs_application_creds
-                            or os.getenv('GS_APPLICATION_CREDS'))
-        if service_account is None:
+        access_key = args.gs_access_key_id or os.getenv('GS_ACCESS_KEY_ID')
+        if access_key is None:
             raise UserException(
-                msg='GS service account is required but not provided',
-                hint=(_config_hint_generate('gs-application-creds', True)))
+                msg='GS Access Key credential is required but not provided',
+                hint=(_config_hint_generate('gs-access-key-id', True)))
 
-    return gs.Credentials(service_account)
+        secret_key = os.getenv('GS_SECRET_ACCESS_KEY')
+        if secret_key is None:
+            raise UserException(
+                msg='GS Secret Key credential is required but not provided',
+                hint=_config_hint_generate('gs-secret-access-key', False))
+
+    return gs.Credentials(access_key, secret_key)
 
 
 def configure_backup_cxt(args):
@@ -478,15 +474,19 @@ def configure_backup_cxt(args):
                 hint=_config_hint_generate('wabs-account-name', True))
 
         access_key = os.getenv('WABS_ACCESS_KEY')
-        if access_key is None:
+        access_token = os.getenv('WABS_SAS_TOKEN')
+        if not (access_key or access_token):
             raise UserException(
-                msg='WABS access key credential is required but not provided',
-                hint=_config_hint_generate('wabs-access-key', False))
+                msg='WABS access credentials is required but not provided',
+                hint=(
+                    'Define one of the WABS_ACCESS_KEY or '
+                    'WABS_SAS_TOKEN environment variables.'
+                ))
 
         from wal_e.blobstore import wabs
         from wal_e.operator.wabs_operator import WABSBackup
 
-        creds = wabs.Credentials(account_name, access_key)
+        creds = wabs.Credentials(account_name, access_key, access_token)
 
         return WABSBackup(store, creds, gpg_key_id)
     elif store.is_swift:
@@ -504,9 +504,8 @@ def configure_backup_cxt(args):
         )
         return SwiftBackup(store, creds, gpg_key_id)
     elif store.is_gs:
-        creds = gs_creds(args)
         from wal_e.operator.gs_operator import GSBackup
-        return GSBackup(store, creds, gpg_key_id)
+        return GSBackup(store, gpg_key_id)
     else:
         raise UserCritical(
             msg='no unsupported blob stores should get here',
@@ -525,8 +524,11 @@ def render_subcommand(args):
     """Render a subcommand for human-centric viewing"""
     if args.subcommand == 'delete':
         return 'delete ' + args.delete_subcommand
-    else:
-        return args.subcommand
+
+    if args.subcommand in ('wal-prefetch', 'wal-push', 'wal-fetch'):
+        return None
+
+    return args.subcommand
 
 
 def main():
@@ -543,16 +545,17 @@ def main():
     if subcommand == 'version':
         import pkgutil
 
-        print pkgutil.get_data('wal_e', 'VERSION').strip()
+        print(pkgutil.get_data('wal_e', 'VERSION').decode('ascii').strip())
         sys.exit(0)
 
     # Print a start-up message right away.
     #
     # Otherwise, it is hard to tell when and how WAL-E started in logs
     # because often emits status output too late.
-    logger.info(msg='starting WAL-E',
-                detail=('The subcommand is "{0}".'
-                        .format(render_subcommand(args))))
+    rendered = render_subcommand(args)
+    if rendered is not None:
+        logger.info(msg='starting WAL-E',
+                    detail='The subcommand is "{0}".'.format(rendered))
 
     try:
         backup_cxt = configure_backup_cxt(args)
@@ -669,11 +672,128 @@ def main():
 
             raise backup_cxt.exceptions[-1]
 
-    except UserException, e:
+    except UserException as e:
         logger.log(level=e.severity,
                    msg=e.msg, detail=e.detail, hint=e.hint)
         sys.exit(1)
-    except Exception, e:
+    except Exception as e:
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail=''.join(traceback.format_exception(*sys.exc_info())))
+        logger.critical(
+            msg='An unprocessed exception has avoided all error handling',
+            detail='')
         logger.critical(
             msg='An unprocessed exception has avoided all error handling',
             detail=''.join(traceback.format_exception(*sys.exc_info())))
